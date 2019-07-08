@@ -1,0 +1,12 @@
+{
+  "devDependencies": {
+    "minimist": "^1.2.0",
+    "tape": "^4.11.0"
+  },
+  "dependencies": {
+    "end-of-stream": "^1.4.1",
+    "multiplex": "^6.7.0",
+    "peer-channel": "^0.1.2",
+    "pump": "^3.0.0"
+  }
+}
