@@ -1,101 +1,162 @@
-var EventEmitter = require('events').EventEmitter
+var MultiBitfield = require('bitfield-db/multi')
+var Tinybox = require('tinybox')
 var multiplex = require('multiplex')
-var pump = require('pump')
 var hypercore = require('hypercore')
-var onend = require('end-of-stream')
+var { keyPair } = require('hypercore-crypto')
+var pump = require('pump')
+var { Readable } = require('readable-stream')
+var { EventEmitter } = require('events')
+var { nextTick } = process
+var path = require('path')
+var raf = require('random-access-file')
+
+var UNREAD = 'u!'
+var ARCHIVE = 'a!'
 
 module.exports = MQ
 
 function MQ (opts) {
-  var self = this
   if (!(this instanceof MQ)) return new MQ(opts)
-  this.id = opts.id
   this._network = opts.network
   this._storage = opts.storage
-  this._cores = {}
-  this._connections = {}
-  this._coresOpen = {}
-  this._streams = []
+  this._sendCores = {}
+  this._idStore = null
+  this._secretKey = null
+  this._listenCores = {}
+  this._sendConnections = {}
+  var multi = new MultiBitfield({
+    storage: this._openStore('bitfield')
+  })
+  this._bitfield = {
+    unread: multi.open(UNREAD),
+    archive: multi.open(ARCHIVE)
+  }
 }
+
 MQ.prototype = Object.create(EventEmitter.prototype)
 
-MQ.prototype.listen = function (ownId) {
+MQ.prototype._openStore = function (name) {
   var self = this
-  var server = this._network.createServer(function (stream) {
-    //console.log('CONNECT')
-    var plex = multiplex(function (stream, id) {
-      if (self._coresOpen.hasOwnProperty(id)) return stream.destroy()
-      if (id === ownId) return stream.destroy()
-      self._coresOpen[id] = true
-      onend(stream, function () {
-        delete self._coresOpen[id]
+  var s = self._storage(name)
+  if (typeof s === 'string') return raf(s)
+  else return s
+}
+
+MQ.prototype._storeFn = function (prefix) {
+  var self = this
+  return function (name) {
+    var s = self._storage(path.join(prefix,name))
+    if (typeof s === 'string') return raf(s)
+    else return s
+  }
+}
+
+MQ.prototype.getPublicKey = function (cb) {
+  this.getSecretKey(function (err, buf) {
+    if (err) cb(err)
+    else cb(null, buf.slice(32))
+  })
+}
+
+MQ.prototype.getSecretKey = function (cb) {
+  var self = this
+  if (self._secretKey) return nextTick(cb, self._secretKey)
+  if (!self._idStore) {
+    self._idStore = self._openStore('id')
+  }
+  self._idStore.stat(function (err, stat) {
+    if (err && err.code !== 'ENOENT') return cb(err)
+    if (!stat || stat.size === 0) {
+      var kp = keyPair()
+      self._idStore.write(0, kp.secretKey, function (err) {
+        if (err) return cb(err)
+        self._secretKey = kp.secretKey
+        cb(null, kp.secretKey)
       })
-      //console.log('STREAM', id)
-      if (!self._cores[id]) {
-        self._cores[id] = hypercore(self._storage(id), id, {
-          sparse: true
-        })
-        self._cores[id].createReadStream({ live: true })
-          .on('data', function (row) {
-            self.emit('message', row)
-          })
+    } else {
+      self._idStore.read(0, stat.size, function (err, buf) {
+        if (err) return cb(err)
+        self._secretKey = buf
+        cb(null, buf)
+      })
+    }
+  })
+}
+
+MQ.prototype.listen = function (cb) {
+  var self = this
+  var server = self._network.createServer(function (cstream) {
+    var plex = multiplex(function (stream, id) {
+      console.log('PLEX',id)
+      if (!self._listenCores[id]) {
+        self._listenCores[id] = hypercore(
+          self._storeFn(id), id, { sparse: true }
+        )
+        self.emit('_core', id, self._listenCores[id])
       }
-      var feed = self._cores[id]
-      // todo: feed.download()
-      //var r = feed.replicate({ sparse: true, live: true })
-      var r = feed.replicate({ live: true })
-      pump(r, stream, r)
+      var core = self._listenCores[id]
+      var r = core.replicate({
+        live: true,
+        sparse: true
+      })
+      pump(stream, r, stream, function (err) {
+        // ...
+      })
     })
-    pump(stream, plex, stream, function (err) {
+    pump(cstream, plex, cstream, function (err) {
       // ...
     })
   })
-  server.listen(ownId)
+  self.getPublicKey(function (err, id) {
+    if (err) return self.emit('error', err)
+    if (typeof cb === 'function') cb(id)
+    server.listen(id)
+  })
 }
 
-MQ.prototype.send = function (opts, cb) {
-  var core = this._open(opts.to)
-  core.append(opts.message, cb)
-}
-
-MQ.prototype._open = function (to) {
-  if (this._cores.hasOwnProperty(to)) return this._cores[to]
-  this._cores[to] = hypercore(this._storage(to))
-  this._connect(to)
-  return this._cores[to]
-}
-
-MQ.prototype._connect = function (to) {
+MQ.prototype.createReadStream = function (name, opts) {
   var self = this
-  if (self._connections.hasOwnProperty(to)) return
-  var c = self._connections[to] = self._network.connect(to)
-  var core = self._cores[to]
-  c.on('connect', function (stream) {
-    self._streams.push(stream)
-    var plex = multiplex()
-    var reTime = null
-    core.ready(function restream () {
-      reTime = null
-      var s = plex.createStream(core.key.toString('hex'))
-      var r = self._cores[to].replicate({ live: true, sparse: true })
+  self.on('_core', function (core) {
+    console.log('core',core.key)
+  })
+  return new Readable({
+    objectMode: true,
+    read: function (n) {
+      console.log(self._listenCores)
+      this.push(null)
+    }
+  })
+}
+
+MQ.prototype.send = function (m, cb) {
+  if (!this._sendCores[m.to]) {
+    this._sendCores[m.to] = hypercore(this._storeFn(m.to))
+  }
+  var core = this._sendCores[m.to]
+  if (!this._sendConnections[m.to]) {
+    console.log('connect',m.to)
+    var c = this._network.connect(m.to)
+    c.on('connect', function (stream) {
+      var plex = multiplex()
+      var s = plex.createStream(m.to)
+      var r = core.replicate({
+        live: true,
+        download: false,
+        ack: true
+      })
+      r.on('ack', function (seq) {
+        console.log('ACK', seq)
+        core.clear(seq, seq+1, function (err) {
+          // ...
+        })
+      })
       pump(s, r, s, function (err) {
-        reTime = setTimeout(restream, 1000)
+        // ...
+      })
+      pump(stream, plex, stream, function (err) {
+        // ...
       })
     })
-    pump(stream, plex, stream, function (err) {
-      if (reTime) clearTimeout(reTime)
-      var ix = self._streams.indexOf(stream)
-      if (ix >= 0) self._streams.splice(ix,1)
-    })
-  })
-}
-
-MQ.prototype.close = function () {
-  var self = this
-  Object.keys(self._connections).forEach(function (key) {
-    self._connections[key].close()
-  })
-  self._streams.forEach(function (stream) {
-    stream.destroy()
-  })
+  }
+  core.append(m.message, cb)
 }
