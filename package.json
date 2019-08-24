@@ -6,8 +6,11 @@
   },
   "dependencies": {
     "bitfield-db": "^1.1.0",
+    "duplexify": "^4.1.1",
     "end-of-stream": "^1.4.1",
     "hypercore-crypto": "^1.0.0",
+    "hypercore-protocol-substream": "^2.0.2",
+    "hyperswarm": "^2.0.6",
     "multiplex": "^6.7.0",
     "peer-channel": "^0.1.2",
     "pump": "^3.0.0",

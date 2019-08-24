@@ -9,15 +9,23 @@ var argv = minimist(process.argv.slice(2), {
 require('mkdirp').sync(argv.datadir)
 
 var mq = peermq({
-  network: require('peer-channel'),
+  network: require('../network.js'),
   storage: function (name) {
     return path.join(argv.datadir, name)
   }
 })
-if (argv._[0] === 'listen') {
-  mq.listen(function (id) {
-    console.log(id.toString('hex'))
+
+if (argv._[0] === 'id') {
+  mq.getId(function (err, id) {
+    if (err) console.error(err)
+    else console.log(id.toString('hex'))
   })
+} else if (argv._[0] === 'add-peer') {
+  mq.addPeer(argv._[1], function (err) {
+    if (err) console.error(err)
+  })
+} else if (argv._[0] === 'listen') {
+  mq.listen()
   mq.createReadStream('unread', { live: true }).pipe(new Transform({
     objectMode: true,
     transform: function ({ from, seq, data }, enc, next) {

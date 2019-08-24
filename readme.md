@@ -2,47 +2,31 @@
 
 message queue with peer networking
 
+todo: verified hypercore session
+
 # example
 
 ``` js
-var hypercore = require('hypercore')
-var peermq = require('peermq')
-var path = require('path')
-
-var minimist = require('minimist')
-var argv = minimist(process.argv.slice(2), {
-  alias: { m: 'message', d: 'datadir' }
-})
-
-var mq = peermq({
-  network: require('peer-channel'),
-  storage: function (name) {
-    return path.join(argv.datadir, name)
-  }
-})
-if (argv._[0] === 'listen') {
-  mq.listen(argv.id)
-  mq.on('message', function (msg) {
-    console.log('MESSAGE', msg.toString())
-  })
-} else if (argv._[0] === 'send') {
-  mq.send({ to: argv.to, message: argv.message }, function (err) {
-    if (err) console.error(err)
-    mq.close()
-  })
-}
 ```
 
-send a message to a node (that hasn't been started up yet):
+first, get the ID of the listening node:
 
 ```
-$ node mq.js send -d /tmp/xyz789 --id xyz789 --to abc123 -m hi
+$ node mq.js -d /tmp/abc id
+4338729847d8d770b6c929ef005be1787da1e8f4b1e2c004c3b549df22eeaf5d
 ```
 
-start up node abc123 and receive the message from xyz789:
+send a message to the listening node (that hasn't been started up yet):
 
 ```
-$ node mq.js listen -d /tmp/abc123 --id abc123
+$ node mq.js -d /tmp/xyz send -m hi \
+  --to 4338729847d8d770b6c929ef005be1787da1e8f4b1e2c004c3b549df22eeaf5d
+```
+
+start up the listener and receive the message:
+
+```
+$ node mq.js -d /tmp/abc listen
 MESSAGE: hi
 ```
 
