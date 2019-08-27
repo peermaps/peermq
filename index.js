@@ -28,6 +28,7 @@ function MQ (opts) {
   this._storage = opts.storage
   this._db = new Tinybox(this._openStore('db'))
   this._sendCores = {}
+  this._sendCoreLengths = {}
   this._listenCores = {}
   this._listenProtos = {}
   this._idStore = null
@@ -127,76 +128,59 @@ MQ.prototype._getPubKeyForDKey = function (dKey, cb) {
 
 MQ.prototype.listen = function (cb) {
   var self = this
-  self.getPublicKey(function (err, id) {
+  self.getPublicKey(function (err, ownId) {
     if (err && cb) return cb(err)
     else if (err) return
     var server = self._network.createServer(function (cstream) {
-      var proto = self._listenProtos[id] = protocol({
+      var proto = protocol({
         live: true,
         sparse: true
       })
-      proto.feed(id)
+      var core
       proto.on('feed', function (discoveryKey) {
+        var feed = proto._remoteFeeds[0]
         self._getPubKeyForDKey(discoveryKey, function (err, pubKey) {
           if (err) return proto.destroy()
           if (!pubKey) return
-          console.log('FEED', discoveryKey, '=>', pubKey)
-          var hpkey = pubKey.toString('hex')
-          var core = self._listenCores[hpkey] = hypercore(
-            self._storeFn(hpkey), pubKey, { sparse: true }
+          var id = pubKey.toString('hex')
+          self._listenProtos[id] = proto
+          core = self._listenCores[id] = hypercore(
+            self._storeFn(id), pubKey, { sparse: true }
           )
           core.ready(function () {
             self._bitfield.read[id] = self._multi.open(B_READ + id + '!')
             self._bitfield.archive[id] = self._multi.open(B_ARCHIVE + id + '!')
             self._bitfield.deleted[id] = self._multi.open(B_DELETED + id + '!')
             self.emit('_core', core)
-            core.replicate({
+            var r = core.replicate({
               sparse: true,
               live: true,
               stream: proto
             })
+            var onhave = feed.peer.onhave
+            var len = 0
+            feed.peer.onhave = function (have) {
+              if (typeof onhave === 'function') onhave.call(feed.peer, have)
+              if (!have.bitfield) {
+                len = Math.max(len, have.start + have.length)
+                var eq = self._sendCoreLengths[id] === len
+                self._sendCoreLengths[id] = len
+                if (!eq) self.emit('_coreLength!'+id, len)
+              }
+            }
           })
         })
-      })
-      proto.on('handshake', function (h) {
-        console.log('HANDSHAKE',h)
       })
       pump(proto, cstream, proto, function (err) {
         console.log('END', err)
       })
     })
-    server.listen(id)
+    server.listen(ownId)
   })
-  /*
-  var plex = multiplex(function (stream, id) {
-    if (!/^[0-9A-Fa-f]{64}$/.test(id)) return stream.destroy()
-    var core = self._listenCores[id]
-    if (!core) {
-      core = self._listenCores[id] = hypercore(
-        self._storeFn(id), id, { sparse: true }
-      )
-      core.ready(function () {
-        self._bitfield.read[id] = self._multi.open(B_READ + id + '!')
-        self._bitfield.archive[id] = self._multi.open(B_ARCHIVE + id + '!')
-        self._bitfield.deleted[id] = self._multi.open(B_DELETED + id + '!')
-        self.emit('_core', self._listenCores[id])
-      })
-    }
-    var r = core.replicate({
-      live: true,
-      sparse: true
-    })
-    r.on('handshake', function (h) {
-      console.log('HANDSHAKE', h)
-    })
-    pump(stream, r, stream, function (err) {
-      // ...
-    })
-  })
-  pump(cstream, plex, cstream, function (err) {
-    // ...
-  })
-  */
+}
+
+MQ.prototype.archive = function (msg, cb) {
+  nextTick(cb)
 }
 
 MQ.prototype.createReadStream = function (name, opts) {
@@ -213,13 +197,18 @@ MQ.prototype.createReadStream = function (name, opts) {
     objectMode: true,
     read: function (n) {
       if (queue.length > 0) {
-        this.push(queue.shift())
-      } else if (cores.length === 0) {
-        this.push(null)
-      } else {
-        reading = true
-        for (var i = 0; i < cores.length; i++) {
+        return this.push(queue.shift())
+      }
+      // todo: check if all open cores have closed in non-live mode
+      reading = true
+      for (var i = 0; i < cores.length; i++) {
+        var key = coreKeys[i]
+        if (self._sendCoreLengths.hasOwnProperty(key)) {
           readNext(cores[i], coreKeys[i], push)
+        } else { // todo: speed this up by having a single resident listener
+          self.once('_coreLength!'+key, readNext.bind(
+            null, cores[i], coreKeys[i], push
+          ))
         }
       }
     },
@@ -228,8 +217,8 @@ MQ.prototype.createReadStream = function (name, opts) {
     }
   })
   return stream
+
   function push (err, msg) {
-    console.log('PUSH',msg)
     if (err) {
       stream.emit('error', err)
     } else if (reading) {
@@ -240,28 +229,31 @@ MQ.prototype.createReadStream = function (name, opts) {
     }
   }
   function cleanup () {
-    console.log(self._listenCores)
     self.removeListener('_core', oncore)
   }
   function oncore (core) {
     cores.push(core)
     var key = core.key.toString('hex')
     coreKeys.push(key)
-    offsets[key] = 0
+    offsets[key] = -1
     if (!self._bitfield.read[key]) {
       self._bitfield.read[key] = self._multi.open(B_READ + key + '!')
     }
     readNext(core, key, push)
   }
   function readNext (core, key, cb) {
+    var len = self._sendCoreLengths[key]
     self._bitfield.read[key].next0(offsets[key], function (err, x) {
-      console.log('NEXT',key,err,x, core.length)
       if (err) return cb(err)
-      else if (x >= core.length) return cb(null, null)
-      core.get(x, function (err, node) {
+      else if (x >= len) {
+        // todo: only set up a listener the first time in non-live mode
+        return self.once('_coreLength!'+key,
+          readNext.bind(null, core, key, push))
+      }
+      core.get(x, function (err, buf) {
         if (err) return cb(err)
         offsets[key] = x
-        cb(null, node)
+        cb(null, { seq: x, from: key, data: buf })
       })
     })
   }
@@ -270,55 +262,42 @@ MQ.prototype.createReadStream = function (name, opts) {
 MQ.prototype.send = function (m, cb) {
   var self = this
   if (!isValidKey(m.to)) return nextTick(cb, new Error('invalid key: ' + m.to))
-  if (!this._sendCores[m.to]) {
-    this._sendCores[m.to] = hypercore(this._storeFn(m.to))
-  }
-  var core = this._sendCores[m.to]
-  core.append(m.message, cb)
-
-  if (!this._sendConnections[m.to]) {
+  self.getSecretKey(function (err, secretKey) {
+    var pubKey = secretKey.slice(32)
+    var core = hypercore(self._storeFn(m.to), pubKey, {
+      secretKey
+    })
+    self._sendCores[m.to] = core
     var toBuf = asBuffer(m.to)
-    self.getPublicKey(function (err, id) {
-      var stream = self._network.connect(toBuf, { id })
-      console.log('CREATE STREAM', m.to)
-      var proto = protocol({
-        live: true,
-        sparse: true
-      })
-      proto.on('feed', function (discoveryKey) {
-        console.log('FEED', discoveryKey)
-      })
-      proto.on('handshake', function (h) {
-        console.log('HANDSHAKE',h)
-      })
-      proto.feed(toBuf)
-      pump(proto, stream, proto, function (err) {
-        console.log('END', err)
-      })
-      proto.feed(id)
-      console.log('SEND FEED', toBuf)
-      console.log('SEND FEED', id)
+    var stream = self._network.connect(toBuf, { id: pubKey })
+    var r = core.replicate({
+      live: true,
+      sparse: true
     })
-  }
-  /*
-  var r = core.replicate({
-    live: true,
-    download: false,
-    ack: true
-  })
-  r.on('handshake', function (h) {
-    console.log('HANDSHAKE',h)
-  })
-  r.on('ack', function (seq) {
-    console.log('ACK', seq)
-    core.clear(seq, seq+1, function (err) {
-      // ...
+    var feed = null, pending = 3
+    function ready () {
+      if (typeof cb === 'function') cb()
+    }
+    r.on('feed', function (feedDK) {
+      feed = r._remoteFeeds[0]
+      if (--pending === 0) ready()
+    })
+    core.append(m.message, function () {
+      if (--pending === 0) ready()
+    })
+    if (--pending === 0) ready()
+    r.on('ack', function (seq) {
+      console.log('ACK', seq)
+      /*
+      core.clear(seq, seq+1, function (err) {
+        // ...
+      })
+      */
+    })
+    pump(stream, r, stream, function (err) {
+      if (err) console.error(err)
     })
   })
-  pump(r, stream, r, function (err) {
-    console.log('END', err)
-  })
-  */
 }
 
 function asBuffer (x) {
