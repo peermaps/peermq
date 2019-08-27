@@ -37,4 +37,6 @@ if (argv._[0] === 'id') {
   mq.send({ to: argv.to, message: argv.message }, function (err) {
     if (err) console.error(err)
   })
+} else if (argv._[0] === 'connect') {
+  mq.connect(argv._[1])
 }

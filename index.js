@@ -34,6 +34,7 @@ function MQ (opts) {
   this._idStore = null
   this._secretKey = null
   this._sendConnections = {}
+  this._listening = false
   this._multi = new MultiBitfield(this._openStore('bitfield'))
   this._bitfield = {
     read: {},
@@ -127,7 +128,10 @@ MQ.prototype._getPubKeyForDKey = function (dKey, cb) {
 }
 
 MQ.prototype.listen = function (cb) {
+  if (!cb) cb = noop
   var self = this
+  if (self._listening) return nextTick(cb)
+  self._listening = true
   self.getPublicKey(function (err, ownId) {
     if (err && cb) return cb(err)
     else if (err) return
@@ -176,10 +180,19 @@ MQ.prototype.listen = function (cb) {
       })
     })
     server.listen(ownId)
+    cb(null)
   })
 }
 
 MQ.prototype.archive = function (msg, cb) {
+  var readBF = this._bitfield.read[msg.from]
+  var archiveBF = this._bitfield.archive[msg.from]
+  readBF.add(msg.seq)
+  archiveBF.add(msg.seq)
+  this._multi.flush(cb)
+}
+
+MQ.prototype.clear = function (msg, cb) {
   nextTick(cb)
 }
 
@@ -259,44 +272,56 @@ MQ.prototype.createReadStream = function (name, opts) {
   }
 }
 
-MQ.prototype.send = function (m, cb) {
+MQ.prototype.connect = function (to, cb) {
+  if (!cb) cb = noop
   var self = this
-  if (!isValidKey(m.to)) return nextTick(cb, new Error('invalid key: ' + m.to))
-  self.getSecretKey(function (err, secretKey) {
-    var pubKey = secretKey.slice(32)
-    var core = hypercore(self._storeFn(m.to), pubKey, {
-      secretKey
-    })
-    self._sendCores[m.to] = core
-    var toBuf = asBuffer(m.to)
+  var pubKey = null, core = null
+  var pending = 3
+  self._openSendCore(to, function (err, core_) {
+    if (err) return cb(err)
+    core = core_
+    if (--pending === 0) ready()
+  })
+  self.getPublicKey(function (err, pubKey_) {
+    if (err) return cb(err)
+    pubKey = pubKey_
+    if (--pending === 0) ready()
+  })
+  if (--pending === 0) ready()
+
+  function ready () {
+    var toBuf = asBuffer(to)
     var stream = self._network.connect(toBuf, { id: pubKey })
     var r = core.replicate({
+      ack: true,
       live: true,
       sparse: true
     })
-    var feed = null, pending = 3
-    function ready () {
-      if (typeof cb === 'function') cb()
-    }
-    r.on('feed', function (feedDK) {
-      feed = r._remoteFeeds[0]
-      if (--pending === 0) ready()
-    })
-    core.append(m.message, function () {
-      if (--pending === 0) ready()
-    })
-    if (--pending === 0) ready()
-    r.on('ack', function (seq) {
-      console.log('ACK', seq)
-      /*
-      core.clear(seq, seq+1, function (err) {
-        // ...
-      })
-      */
+    r.on('ack', function (ack) {
+      console.log('ACK', ack)
     })
     pump(stream, r, stream, function (err) {
       if (err) console.error(err)
     })
+  }
+}
+
+MQ.prototype.send = function (m, cb) {
+  this._openSendCore(m.to, function (err, core) {
+    core.append(m.message, cb)
+  })
+}
+
+MQ.prototype._openSendCore = function (to, cb) {
+  var self = this
+  if (!isValidKey(to)) return nextTick(cb, new Error('invalid key: ' + to))
+  if (self._sendCores[to]) return nextTick(cb, self._sendCores[to])
+  self.getSecretKey(function (err, secretKey) {
+    if (err) return cb(err)
+    var pubKey = secretKey.slice(32)
+    var core = hypercore(self._storeFn(to), pubKey, { secretKey })
+    self._sendCores[to] = core
+    cb(null, core)
   })
 }
 
@@ -310,3 +335,5 @@ function isValidKey (x) {
   if (typeof x === 'string' && /^[0-9A-Fa-f]{64}$/.test(x)) return true
   return false
 }
+
+function noop () {}
