@@ -9,6 +9,7 @@ var { EventEmitter } = require('events')
 var { nextTick } = process
 var path = require('path')
 var raf = require('random-access-file')
+var uniq = require('uniq')
 
 // bitfield prefixes:
 var B_READ = 'r!'
@@ -22,6 +23,7 @@ var D_SIZE = 's!'
 module.exports = MQ
 
 function MQ (opts) {
+  var self = this
   if (!(this instanceof MQ)) return new MQ(opts)
   EventEmitter.call(this)
   this._network = opts.network
@@ -35,6 +37,20 @@ function MQ (opts) {
   this._secretKey = null
   this._sendConnections = {}
   this._listening = false
+  this._peers = null
+  this._db.get('peers', function (err, node) {
+    if (err) return self.emit('error', err)
+    if (!node) {
+      self._peers = []
+    } else {
+      try {
+        self._peers = JSON.parse(node.value.toString('utf8'))
+      } catch (err) {
+        return self.emit('error', err)
+      }
+    }
+    self.emit('_peers', self._peers)
+  })
   this._multi = new MultiBitfield(this._openStore('bitfield'))
   this._bitfield = {
     read: {},
@@ -95,27 +111,50 @@ MQ.prototype.getSecretKey = function (cb) {
 }
 
 MQ.prototype._addPeer = function (pubKey) {
+  // expects that this._peers is already loaded
   var bufPK = asBuffer(pubKey)
   var key = D_DKEY + discoveryKey(bufPK).toString('hex')
+  this._peers.push(bufPK.toString('hex'))
+  uniq(this._peers)
+  this._peers.sort()
   this._db.put(D_DKEY + discoveryKey(bufPK).toString('hex'), bufPK)
+  this._db.put('peers', Buffer.from(JSON.stringify(this._peers)))
+}
+
+MQ.prototype._getPeers = function (cb) {
+  var self = this
+  if (self._peers) {
+    nextTick(cb, null, self._peers)
+  } else {
+    self.once('_peers', function () {
+      cb(null, self._peers)
+    })
+  }
 }
 
 MQ.prototype.addPeer = function (pubKey, cb) {
+  var self = this
   if (!isValidKey(pubKey)) return nextTick(cb, new Error('invalid pub key'))
-  this._addPeer(pubKey)
-  this._db.flush(cb)
+  self._getPeers(function (err, peers) {
+    if (err) return cb(err)
+    self._addPeer(pubKey)
+    self._db.flush(cb)
+  })
 }
 
 MQ.prototype.addPeers = function (pubKeys, cb) {
+  var self = this
   for (var i = 0; i < pubKeys.length; i++) {
     if (!isValidKey(pubKeys[i])) {
       return nextTick(cb, new Error('invalid pub key'))
     }
   }
-  for (var i = 0; i < pubKeys.length; i++) {
-    this._addPeer(pubKeys[i])
-  }
-  this._db.flush(cb)
+  self._getPeers(function (err, peers) {
+    for (var i = 0; i < pubKeys.length; i++) {
+      self._addPeer(pubKeys[i])
+    }
+    self._db.flush(cb)
+  })
 }
 
 MQ.prototype._getPubKeyForDKey = function (dKey, cb) {
@@ -141,40 +180,7 @@ MQ.prototype.listen = function (cb) {
         sparse: true
       })
       var core
-      proto.on('feed', function (discoveryKey) {
-        var feed = proto._remoteFeeds[0]
-        self._getPubKeyForDKey(discoveryKey, function (err, pubKey) {
-          if (err) return proto.destroy()
-          if (!pubKey) return
-          var id = pubKey.toString('hex')
-          self._listenProtos[id] = proto
-          core = self._listenCores[id] = hypercore(
-            self._storeFn(id), pubKey, { sparse: true }
-          )
-          core.ready(function () {
-            self._bitfield.read[id] = self._multi.open(B_READ + id + '!')
-            self._bitfield.archive[id] = self._multi.open(B_ARCHIVE + id + '!')
-            self._bitfield.deleted[id] = self._multi.open(B_DELETED + id + '!')
-            self.emit('_core', core)
-            var r = core.replicate({
-              sparse: true,
-              live: true,
-              stream: proto
-            })
-            var onhave = feed.peer.onhave
-            var len = 0
-            feed.peer.onhave = function (have) {
-              if (typeof onhave === 'function') onhave.call(feed.peer, have)
-              if (!have.bitfield) {
-                len = Math.max(len, have.start + have.length)
-                var eq = self._sendCoreLengths[id] === len
-                self._sendCoreLengths[id] = len
-                if (!eq) self.emit('_coreLength!'+id, len)
-              }
-            }
-          })
-        })
-      })
+      proto.on('feed', onfeed.bind(null, proto))
       pump(proto, cstream, proto, function (err) {
         console.log('END', err)
       })
@@ -182,6 +188,33 @@ MQ.prototype.listen = function (cb) {
     server.listen(ownId)
     cb(null)
   })
+  function onfeed (proto, discoveryKey) {
+    var feed = proto._remoteFeeds[0]
+    self._getPubKeyForDKey(discoveryKey, function (err, pubKey) {
+      if (err) return proto.destroy()
+      if (!pubKey) return
+      var id = pubKey.toString('hex')
+      self._listenProtos[id] = proto
+      self._openListenCore(id, function (err, core) {
+        var r = core.replicate({
+          sparse: true,
+          live: true,
+          stream: proto
+        })
+        var onhave = feed.peer.onhave
+        var len = 0
+        feed.peer.onhave = function (have) {
+          if (typeof onhave === 'function') onhave.call(feed.peer, have)
+          if (!have.bitfield) {
+            len = Math.max(core.length, len, have.start + have.length)
+            var eq = self._sendCoreLengths[id] === len
+            self._sendCoreLengths[id] = len
+            if (!eq) self.emit('_coreLength!'+id, len)
+          }
+        }
+      })
+    })
+  }
 }
 
 MQ.prototype.archive = function (msg, cb) {
@@ -203,6 +236,11 @@ MQ.prototype.createReadStream = function (name, opts) {
   var offsets = {}
   var queue = []
   self.on('_core', oncore)
+  self._getPeers(function (err, peers) {
+    peers.forEach(function (peer) {
+      self._openListenCore(peer)
+    })
+  })
   Object.values(self._listenCores).forEach(oncore)
 
   var reading = false
@@ -257,6 +295,7 @@ MQ.prototype.createReadStream = function (name, opts) {
   function readNext (core, key, cb) {
     var len = self._sendCoreLengths[key]
     self._bitfield.read[key].next0(offsets[key], function (err, x) {
+      console.log(`next ${offsets[key]} => ${x}`)
       if (err) return cb(err)
       else if (x >= len) {
         // todo: only set up a listener the first time in non-live mode
@@ -321,6 +360,26 @@ MQ.prototype._openSendCore = function (to, cb) {
     var pubKey = secretKey.slice(32)
     var core = hypercore(self._storeFn(to), pubKey, { secretKey })
     self._sendCores[to] = core
+    cb(null, core)
+  })
+}
+
+MQ.prototype._openListenCore = function (id, cb) {
+  var self = this
+  if (!cb) cb = noop
+  var core = self._listenCores[id]
+  if (core) return nextTick(cb, null, core)
+  core = hypercore(self._storeFn(id), Buffer.from(id,'hex'), { sparse: true })
+  self._listenCores[id] = core
+  core.ready(function () {
+    self._bitfield.read[id] = self._multi.open(B_READ + id + '!')
+    self._bitfield.archive[id] = self._multi.open(B_ARCHIVE + id + '!')
+    self._bitfield.deleted[id] = self._multi.open(B_DELETED + id + '!')
+    self.emit('_core', core)
+    if (core.length > 0) {
+      self._sendCoreLengths[id] = core.length
+      self.emit('_coreLength!'+id, core.length)
+    }
     cb(null, core)
   })
 }

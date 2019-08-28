@@ -30,7 +30,8 @@ if (argv._[0] === 'id') {
     objectMode: true,
     transform: function ({ from, seq, data }, enc, next) {
       console.log(`MESSAGE ${from}@${seq} ${data.toString()}`)
-      mq.archive({ from, seq }, next)
+      //mq.archive({ from, seq }, next)
+      next()
     }
   }))
 } else if (argv._[0] === 'send') {
