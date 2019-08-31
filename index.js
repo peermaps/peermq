@@ -28,8 +28,10 @@ function MQ (opts) {
   EventEmitter.call(this)
   this._network = opts.network
   this._storage = opts.storage
+  this._openStores = {}
   this._db = new Tinybox(this._openStore('db'))
   this._sendCores = {}
+  this._sendCoreQueue = {}
   this._sendCoreLengths = {}
   this._listenCores = {}
   this._listenProtos = {}
@@ -63,17 +65,23 @@ MQ.prototype = Object.create(EventEmitter.prototype)
 
 MQ.prototype._openStore = function (name) {
   var self = this
+  if (self._openStores[name]) return self._openStores[name]
   var s = self._storage(name)
-  if (typeof s === 'string') return raf(s)
-  else return s
+  if (typeof s === 'string') s = raf(s)
+  self._openStores[name] = s
+  return s
 }
 
 MQ.prototype._storeFn = function (prefix) {
   var self = this
   return function (name) {
-    var s = self._storage(path.join(prefix,name))
-    if (typeof s === 'string') return raf(s)
-    else return s
+    if (Buffer.isBuffer(prefix)) prefix = prefix.toString('hex')
+    var key = path.join(prefix,name)
+    if (self._openStores[key]) return self._openStores[key]
+    var s = self._storage(key)
+    if (typeof s === 'string') s = raf(s)
+    self._openStores[key] = s
+    return s
   }
 }
 
@@ -356,6 +364,11 @@ MQ.prototype.connect = function (to, cb) {
   })
   if (--pending === 0) ready()
   var connection = new EventEmitter
+  var closed = false
+  connection.close = function () {
+    closed = true
+    connection.emit('_close')
+  }
   return connection
 
   function ready () {
@@ -366,6 +379,7 @@ MQ.prototype.connect = function (to, cb) {
       live: true,
       sparse: true
     })
+    connection.once('_close', function () { r.close() })
     r.on('ack', function (ack) {
       connection.emit('ack', ack)
     })
@@ -384,14 +398,33 @@ MQ.prototype.send = function (m, cb) {
 
 MQ.prototype._openSendCore = function (to, cb) {
   var self = this
-  if (!isValidKey(to)) return nextTick(cb, new Error('invalid key: ' + to))
-  if (self._sendCores[to]) return nextTick(cb, self._sendCores[to])
+  var key = to.toString('hex')
+  if (!isValidKey(to)) return nextTick(cb, new Error('invalid key: ' + key))
+  if (self._sendCores[key]) {
+    return nextTick(cb, self._sendCores[key])
+  }
+  if (self._sendCoreQueue[key]) {
+    self._sendCoreQueue[key].push(cb)
+    return
+  }
+  self._sendCoreQueue[key] = []
   self.getSecretKey(function (err, secretKey) {
-    if (err) return cb(err)
+    if (err) {
+      cb(err)
+      for (var i = 0; i < self._sendCoreQueue.length; i++) {
+        self._sendCoreQueue[i](err)
+      }
+      self._sendCoreQueue = null
+      return
+    }
     var pubKey = secretKey.slice(32)
     var core = hypercore(self._storeFn(to), pubKey, { secretKey })
-    self._sendCores[to] = core
+    self._sendCores[key] = core
     cb(null, core)
+    for (var i = 0; i < self._sendCoreQueue.length; i++) {
+      self._sendCoreQueue[i](null, core)
+    }
+    self._sendCoreQueue = null
   })
 }
 
