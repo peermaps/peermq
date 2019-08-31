@@ -182,14 +182,13 @@ MQ.prototype.listen = function (cb) {
       var core
       proto.on('feed', onfeed.bind(null, proto))
       pump(proto, cstream, proto, function (err) {
-        console.log('END', err)
+        // ...
       })
     })
     server.listen(ownId)
-    cb(null)
+    cb(null, server)
   })
   function onfeed (proto, discoveryKey) {
-    var feed = proto._remoteFeeds[0]
     self._getPubKeyForDKey(discoveryKey, function (err, pubKey) {
       if (err) return proto.destroy()
       if (!pubKey) return
@@ -201,10 +200,11 @@ MQ.prototype.listen = function (cb) {
           live: true,
           stream: proto
         })
-        var onhave = feed.peer.onhave
+        var peer = r.feeds[0].peer
+        var onhave = peer.onhave
         var len = 0
-        feed.peer.onhave = function (have) {
-          if (typeof onhave === 'function') onhave.call(feed.peer, have)
+        peer.onhave = function (have) {
+          if (typeof onhave === 'function') onhave.call(peer, have)
           if (!have.bitfield) {
             len = Math.max(core.length, len, have.start + have.length)
             var eq = self._sendCoreLengths[id] === len
@@ -222,11 +222,38 @@ MQ.prototype.archive = function (msg, cb) {
   var archiveBF = this._bitfield.archive[msg.from]
   readBF.add(msg.seq)
   archiveBF.add(msg.seq)
-  this._multi.flush(cb)
+  this._multi.flush(function (err) {
+    if (err) cb(err)
+    else cb()
+  })
 }
 
 MQ.prototype.clear = function (msg, cb) {
-  nextTick(cb)
+  var readBF = this._bitfield.read[msg.from]
+    || this._multi.open(B_READ + msg.from + '!')
+  var archiveBF = this._bitfield.archive[msg.from]
+    || this._multi.open(B_ARCHIVE + msg.from + '!')
+  var deleteBF = this._bitfield.deleted[msg.from]
+    || this._multi.open(B_DELETED + msg.from + '!')
+  readBF.delete(msg.seq)
+  archiveBF.delete(msg.seq)
+  deleteBF.add(msg.seq)
+  var pending = 3, finished = false
+  this._openListenCore(msg.from, function (err, core) {
+    if (err) done(err)
+    else core.clear(msg.seq, done)
+  })
+  this._multi.flush(done)
+  done()
+  function done (err) {
+    if (finished) return
+    if (err) {
+      finished = true
+      cb(err)
+    }
+    if (--pending !== 0) return
+    cb()
+  }
 }
 
 MQ.prototype.createReadStream = function (name, opts) {
@@ -267,6 +294,11 @@ MQ.prototype.createReadStream = function (name, opts) {
       cleanup()
     }
   })
+  if (name !== 'unread') {
+    nextTick(function () {
+      stream.emit('error', new Error('only "unread" is supported right now'))
+    })
+  }
   return stream
 
   function push (err, msg) {
@@ -287,15 +319,11 @@ MQ.prototype.createReadStream = function (name, opts) {
     var key = core.key.toString('hex')
     coreKeys.push(key)
     offsets[key] = -1
-    if (!self._bitfield.read[key]) {
-      self._bitfield.read[key] = self._multi.open(B_READ + key + '!')
-    }
     readNext(core, key, push)
   }
   function readNext (core, key, cb) {
     var len = self._sendCoreLengths[key]
     self._bitfield.read[key].next0(offsets[key], function (err, x) {
-      console.log(`next ${offsets[key]} => ${x}`)
       if (err) return cb(err)
       else if (x >= len) {
         // todo: only set up a listener the first time in non-live mode
@@ -327,6 +355,8 @@ MQ.prototype.connect = function (to, cb) {
     if (--pending === 0) ready()
   })
   if (--pending === 0) ready()
+  var connection = new EventEmitter
+  return connection
 
   function ready () {
     var toBuf = asBuffer(to)
@@ -337,10 +367,11 @@ MQ.prototype.connect = function (to, cb) {
       sparse: true
     })
     r.on('ack', function (ack) {
-      console.log('ACK', ack)
+      connection.emit('ack', ack)
     })
     pump(stream, r, stream, function (err) {
-      if (err) console.error(err)
+      if (err) connection.emit('error', err)
+      else connection.emit('close')
     })
   }
 }

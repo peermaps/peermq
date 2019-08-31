@@ -1,20 +1,33 @@
 {
+  "name": "peermq",
+  "version": "1.0.0",
+  "description": "p2p message queue",
+  "license": "Parity-6.0.0",
+  "keywords": [
+    "message queue",
+    "mq",
+    "p2p",
+    "mailbox",
+    "unread",
+    "queue"
+  ],
   "devDependencies": {
     "minimist": "^1.2.0",
     "random-access-memory": "^3.1.1",
     "tape": "^4.11.0"
   },
   "dependencies": {
-    "bitfield-db": "^1.1.0",
+    "bitfield-db": "^1.2.1",
     "duplexify": "^4.1.1",
-    "end-of-stream": "^1.4.1",
+    "hypercore": "^7.6.1",
     "hypercore-crypto": "^1.0.0",
-    "hypercore-protocol-substream": "^2.0.2",
+    "hypercore-protocol": "^6.12.0",
     "hyperswarm": "^2.0.6",
-    "multiplex": "^6.7.0",
-    "peer-channel": "^0.1.2",
     "pump": "^3.0.0",
     "tinybox": "0.0.0",
     "uniq": "^1.0.1"
+  },
+  "scripts": {
+    "test": "tape test/*.js"
   }
 }
