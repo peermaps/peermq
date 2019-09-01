@@ -28,6 +28,10 @@ Server.prototype.listen = function (id) {
   })
 }
 
+Server.prototype.close = function () {
+  this._swarm.destroy()
+}
+
 exports.connect = function (id, opts) {
   var d = duplexify()
   d._swarm = hyperswarm(opts)
@@ -35,10 +39,11 @@ exports.connect = function (id, opts) {
     lookup: true,
     announce: false
   })
-  d._swarm.on('connection', function (stream, info) {
+  d._swarm.once('connection', function (stream, info) {
     d.setReadable(stream)
     d.setWritable(stream)
     d.emit('connection', stream)
   })
+  d.close = function () { d._swarm.destroy() }
   return d
 }

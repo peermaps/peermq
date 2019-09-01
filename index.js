@@ -35,8 +35,8 @@ function MQ (opts) {
   this._sendCoreLengths = {}
   this._listenCores = {}
   this._listenProtos = {}
-  this._idStore = null
   this._secretKey = null
+  this._secretKeyQueue = null
   this._sendConnections = {}
   this._listening = false
   this._peers = null
@@ -96,26 +96,32 @@ MQ.prototype.getPublicKey = function (cb) {
 MQ.prototype.getSecretKey = function (cb) {
   var self = this
   if (self._secretKey) return nextTick(cb, null, self._secretKey)
-  if (!self._idStore) {
-    self._idStore = self._openStore('id')
+  if (self._secretKeyQueue) {
+    self._secretKeyQueue.push(cb)
+    return
   }
-  self._idStore.stat(function (err, stat) {
-    if (err && err.code !== 'ENOENT') return cb(err)
-    if (!stat || stat.size === 0) {
-      var kp = keyPair()
-      self._idStore.write(0, kp.secretKey, function (err) {
-        if (err) return cb(err)
-        self._secretKey = kp.secretKey
-        cb(null, kp.secretKey)
-      })
-    } else {
-      self._idStore.read(0, stat.size, function (err, buf) {
-        if (err) return cb(err)
-        self._secretKey = buf
-        cb(null, buf)
-      })
-    }
+  self._secretKeyQueue = []
+  self._db.get('secret-key', function (err, node) {
+    if (err) return finish(err)
+    if (node) return finish(null, node.value)
+    var kp = keyPair()
+    self._db.put('secret-key', kp.secretKey, function (err) {
+      if (err) return finish(err)
+      self._secretKey = kp.secretKey
+      finish(null, kp.secretKey)
+    })
   })
+  function finish (err, buf) {
+    var q = self._secretKeyQueue
+    self._secretKeyQueue = null
+    if (err) {
+      cb(err)
+      for (var i = 0; i < q.length; i++) q[i](err)
+    } else {
+      cb(null, buf)
+      for (var i = 0; i < q.length; i++) q[i](null, buf)
+    }
+  }
 }
 
 MQ.prototype._addPeer = function (pubKey) {
@@ -379,7 +385,10 @@ MQ.prototype.connect = function (to, cb) {
       live: true,
       sparse: true
     })
-    connection.once('_close', function () { r.close() })
+    connection.once('_close', function () {
+      r.end()
+      stream.close()
+    })
     r.on('ack', function (ack) {
       connection.emit('ack', ack)
     })
@@ -409,22 +418,18 @@ MQ.prototype._openSendCore = function (to, cb) {
   }
   self._sendCoreQueue[key] = []
   self.getSecretKey(function (err, secretKey) {
+    var q = self._sendCoreQueue[key]
+    self._sendCoreQueue[key] = null
     if (err) {
       cb(err)
-      for (var i = 0; i < self._sendCoreQueue.length; i++) {
-        self._sendCoreQueue[i](err)
-      }
-      self._sendCoreQueue = null
+      for (var i = 0; i < q.length; i++) q[i](err)
       return
     }
     var pubKey = secretKey.slice(32)
     var core = hypercore(self._storeFn(to), pubKey, { secretKey })
     self._sendCores[key] = core
     cb(null, core)
-    for (var i = 0; i < self._sendCoreQueue.length; i++) {
-      self._sendCoreQueue[i](null, core)
-    }
-    self._sendCoreQueue = null
+    for (var i = 0; i < q.length; i++) q[i](null, core)
   })
 }
 
