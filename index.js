@@ -135,7 +135,19 @@ MQ.prototype._addPeer = function (pubKey) {
   this._db.put('peers', Buffer.from(JSON.stringify(this._peers)))
 }
 
-MQ.prototype._getPeers = function (cb) {
+MQ.prototype._removePeer = function (pubKey) {
+  // expects that this._peers is already loaded
+  var bufPK = asBuffer(pubKey)
+  var key = D_DKEY + discoveryKey(bufPK).toString('hex')
+  var ix = this._peers.indexOf(bufPK.toString('hex'))
+  if (ix >= 0) this._peers.splice(ix,1)
+  this._peers.sort()
+  // del not yet implemented, overwrite with an empty buffer:
+  this._db.put(D_DKEY + discoveryKey(bufPK).toString('hex'), Buffer.alloc(0))
+  this._db.put('peers', Buffer.from(JSON.stringify(this._peers)))
+}
+
+MQ.prototype.getPeers = function (cb) {
   var self = this
   if (self._peers) {
     nextTick(cb, null, self._peers)
@@ -149,9 +161,19 @@ MQ.prototype._getPeers = function (cb) {
 MQ.prototype.addPeer = function (pubKey, cb) {
   var self = this
   if (!isValidKey(pubKey)) return nextTick(cb, new Error('invalid pub key'))
-  self._getPeers(function (err, peers) {
+  self.getPeers(function (err, peers) {
     if (err) return cb(err)
     self._addPeer(pubKey)
+    self._db.flush(cb)
+  })
+}
+
+MQ.prototype.removePeer = function (pubKey, cb) {
+  var self = this
+  if (!isValidKey(pubKey)) return nextTick(cb, new Error('invalid pub key'))
+  self.getPeers(function (err, peers) {
+    if (err) return cb(err)
+    self._removePeer(pubKey)
     self._db.flush(cb)
   })
 }
@@ -163,9 +185,24 @@ MQ.prototype.addPeers = function (pubKeys, cb) {
       return nextTick(cb, new Error('invalid pub key'))
     }
   }
-  self._getPeers(function (err, peers) {
+  self.getPeers(function (err, peers) {
     for (var i = 0; i < pubKeys.length; i++) {
       self._addPeer(pubKeys[i])
+    }
+    self._db.flush(cb)
+  })
+}
+
+MQ.prototype.removePeers = function (pubKeys, cb) {
+  var self = this
+  for (var i = 0; i < pubKeys.length; i++) {
+    if (!isValidKey(pubKeys[i])) {
+      return nextTick(cb, new Error('invalid pub key'))
+    }
+  }
+  self.getPeers(function (err, peers) {
+    for (var i = 0; i < pubKeys.length; i++) {
+      self._removePeer(pubKeys[i])
     }
     self._db.flush(cb)
   })
@@ -176,7 +213,8 @@ MQ.prototype._getPubKeyForDKey = function (dKey, cb) {
   var key = D_DKEY + asBuffer(dKey).toString('hex')
   this._db.get(key, function (err, node) {
     if (err) cb(err)
-    else cb(null, node ? node.value : null)
+    else cb(null, node && node.value && node.value.length > 0
+      ? node.value : null)
   })
 }
 
@@ -205,7 +243,7 @@ MQ.prototype.listen = function (cb) {
   function onfeed (proto, discoveryKey) {
     self._getPubKeyForDKey(discoveryKey, function (err, pubKey) {
       if (err) return proto.destroy()
-      if (!pubKey) return
+      if (!pubKey) return proto.destroy()
       var id = pubKey.toString('hex')
       self._listenProtos[id] = proto
       self._openListenCore(id, function (err, core) {
@@ -277,7 +315,7 @@ MQ.prototype.createReadStream = function (name, opts) {
   var offsets = {}
   var queue = []
   self.on('_core', oncore)
-  self._getPeers(function (err, peers) {
+  self.getPeers(function (err, peers) {
     peers.forEach(function (peer) {
       self._openListenCore(peer)
     })

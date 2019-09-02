@@ -153,7 +153,15 @@ Get the id of this node as a Buffer in `cb(err, id)`.
 
 ## mq.addPeer(publicKey, cb)
 
-Authorize a peer to connect by its `publicKey`.
+Authorize a peer to connect by its `publicKey` (Buffer or hex string).
+
+## mq.removePeer(publicKey, cb)
+
+Remove a peer by its `publicKey` (Buffer or hex string).
+
+## mq.getPeers(cb)
+
+Get the list of `peers`, an array of hex string public keys as `cb(err, peers)`.
 
 ## mq.listen(cb)
 
