@@ -23,6 +23,7 @@
     "hypercore-crypto": "^1.0.0",
     "hypercore-protocol": "^6.12.0",
     "hyperswarm": "^2.0.6",
+    "i2p": "^3.0.5",
     "pump": "^3.0.0",
     "tinybox": "0.0.0",
     "uniq": "^1.0.1"
