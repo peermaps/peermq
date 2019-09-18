@@ -1,7 +1,7 @@
 var MultiBitfield = require('bitfield-db/multi')
 var Tinybox = require('tinybox')
 var hypercore = require('hypercore')
-var protocol = require('hypercore-protocol')
+var Protocol = require('hypercore-protocol')
 var { keyPair, discoveryKey } = require('hypercore-crypto')
 var pump = require('pump')
 var { Readable } = require('readable-stream')
@@ -227,12 +227,12 @@ MQ.prototype.listen = function (cb) {
     if (err && cb) return cb(err)
     else if (err) return
     var server = self._network.createServer(function (cstream) {
-      var proto = protocol({
+      var proto = new Protocol(false, {
         live: true,
         sparse: true
       })
       var core
-      proto.on('feed', onfeed.bind(null, proto))
+      proto.on('discovery-key', onfeed.bind(null, proto))
       pump(proto, cstream, proto, function (err) {
         // ...
       })
@@ -247,23 +247,18 @@ MQ.prototype.listen = function (cb) {
       var id = pubKey.toString('hex')
       self._listenProtos[id] = proto
       self._openListenCore(id, function (err, core) {
-        var r = core.replicate({
+        core.on('remote-update', function () {
+          if (self._sendCoreLengths[id] !== core.remoteLength) {
+            self._sendCoreLengths[id] = core.remoteLength
+            self.emit('_coreLength!'+id, core.remoteLength)
+          }
+        })
+        self._sendCoreLengths[id] = core.remoteLength
+        var r = core.replicate(false, {
           sparse: true,
           live: true,
           stream: proto
         })
-        var peer = r.feeds[0].peer
-        var onhave = peer.onhave
-        var len = 0
-        peer.onhave = function (have) {
-          if (typeof onhave === 'function') onhave.call(peer, have)
-          if (!have.bitfield) {
-            len = Math.max(core.length, len, have.start + have.length)
-            var eq = self._sendCoreLengths[id] === len
-            self._sendCoreLengths[id] = len
-            if (!eq) self.emit('_coreLength!'+id, len)
-          }
-        }
       })
     })
   }
@@ -418,7 +413,7 @@ MQ.prototype.connect = function (to, cb) {
   function ready () {
     var toBuf = asBuffer(to)
     var stream = self._network.connect(toBuf, { id: pubKey })
-    var r = core.replicate({
+    var r = core.replicate(true, {
       ack: true,
       live: true,
       sparse: true
