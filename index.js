@@ -91,14 +91,9 @@ MQ.prototype.getId = function (cb) {
   if (self._id) return nextTick(cb, null, self._id)
   self.getKeyPairs(function (err, keys) {
     if (err) return cb(err)
-    self._id = idFromKeys(keys)
+    self._id = keys.hypercore.publicKey
     cb(null, self._id)
   })
-}
-function idFromKeys (keys) {
-  return Buffer.concat([
-    keys.hypercore.publicKey, keys.noise.publicKey
-  ])
 }
 
 MQ.prototype.getKeyPairs = function (cb) {
@@ -267,7 +262,7 @@ MQ.prototype.listen = function (cb) {
         // ...
       })
     })
-    server.listen(idFromKeys(keys))
+    server.listen(keys.hypercore.publicKey)
     cb(null, server)
   })
   function onfeed (proto, keys, discoveryKey) {
@@ -444,7 +439,7 @@ MQ.prototype.connect = function (to, cb) {
   function ready () {
     var toBuf = asBuffer(to)
     var stream = self._network.connect(toBuf, {
-      id: idFromKeys(keys)
+      id: keys.hypercore.publicKey
     })
     var r = core.replicate(true, {
       ack: true,
@@ -510,7 +505,7 @@ MQ.prototype._openListenCore = function (id, cb) {
   if (!cb) cb = noop
   var core = self._listenCores[id]
   if (core) return nextTick(cb, null, core)
-  var pubKey = Buffer.from(id,'hex').slice(0,32)
+  var pubKey = Buffer.from(id,'hex')
   core = hypercore(self._storeFn(id), pubKey, { sparse: true })
   self._listenCores[id] = core
   core.ready(function () {
@@ -532,8 +527,8 @@ function asBuffer (x) {
 }
 
 function isValidKey (x) {
-  if (Buffer.isBuffer(x) && x.length === 64) return true
-  if (typeof x === 'string' && /^[0-9A-Fa-f]{128}$/.test(x)) return true
+  if (Buffer.isBuffer(x) && x.length === 32) return true
+  if (typeof x === 'string' && /^[0-9A-Fa-f]{64}$/.test(x)) return true
   return false
 }
 
