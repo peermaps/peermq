@@ -35,8 +35,9 @@ function MQ (opts) {
   this._sendCoreLengths = {}
   this._listenCores = {}
   this._listenProtos = {}
-  this._secretKey = null
-  this._secretKeyQueue = null
+  this._keys = null
+  this._keyQueue = null
+  this._id = null
   this._sendConnections = {}
   this._listening = false
   this._peers = null
@@ -85,41 +86,66 @@ MQ.prototype._storeFn = function (prefix) {
   }
 }
 
-MQ.prototype.getId =
-MQ.prototype.getPublicKey = function (cb) {
-  this.getSecretKey(function (err, buf) {
-    if (err) cb(err)
-    else cb(null, buf.slice(32))
+MQ.prototype.getId = function (cb) {
+  var self = this
+  if (self._id) return nextTick(cb, null, self._id)
+  self.getKeyPairs(function (err, keys) {
+    if (err) return cb(err)
+    self._id = idFromKeys(keys)
+    cb(null, self._id)
   })
 }
+function idFromKeys (keys) {
+  return Buffer.concat([
+    keys.hypercore.publicKey, keys.noise.publicKey
+  ])
+}
 
-MQ.prototype.getSecretKey = function (cb) {
+MQ.prototype.getKeyPairs = function (cb) {
   var self = this
-  if (self._secretKey) return nextTick(cb, null, self._secretKey)
-  if (self._secretKeyQueue) {
-    self._secretKeyQueue.push(cb)
+  if (self._keys) return nextTick(cb, null, self._keys)
+  if (self._keyQueue) {
+    self._keyQueue.push(cb)
     return
   }
-  self._secretKeyQueue = []
+  self._keyQueue = []
   self._db.get('secret-key', function (err, node) {
     if (err) return finish(err)
-    if (node) return finish(null, node.value)
-    var kp = keyPair()
-    self._db.put('secret-key', kp.secretKey, function (err) {
+    if (node) return finish(null, {
+      hypercore: {
+        secretKey: node.value.slice(0,64),
+        publicKey: node.value.slice(32,64)
+      },
+      noise: {
+        secretKey: node.value.slice(64,96),
+        publicKey: node.value.slice(96,128)
+      }
+    })
+    var hypercoreKeyPair = keyPair()
+    var noiseKeyPair = Protocol.keyPair()
+    var kpBuf = Buffer.concat([
+      hypercoreKeyPair.secretKey, // 64 bytes
+      noiseKeyPair.secretKey, // 32 bytes
+      noiseKeyPair.publicKey // 32 bytes
+    ])
+    self._db.put('secret-key', kpBuf, function (err) {
       if (err) return finish(err)
-      self._secretKey = kp.secretKey
-      finish(null, kp.secretKey)
+      finish(null, {
+        hypercore: hypercoreKeyPair,
+        noise: noiseKeyPair
+      })
     })
   })
-  function finish (err, buf) {
-    var q = self._secretKeyQueue
-    self._secretKeyQueue = null
+  function finish (err, keys) {
+    if (!err) self._keys = keys
+    var q = self._keyQueue
+    self._keyQueue = null
     if (err) {
       cb(err)
       for (var i = 0; i < q.length; i++) q[i](err)
     } else {
-      cb(null, buf)
-      for (var i = 0; i < q.length; i++) q[i](null, buf)
+      cb(null, keys)
+      for (var i = 0; i < q.length; i++) q[i](null, keys)
     }
   }
 }
@@ -223,24 +249,28 @@ MQ.prototype.listen = function (cb) {
   var self = this
   if (self._listening) return nextTick(cb)
   self._listening = true
-  self.getPublicKey(function (err, ownId) {
+  self.getKeyPairs(function (err, keys) {
     if (err && cb) return cb(err)
     else if (err) return
     var server = self._network.createServer(function (cstream) {
       var proto = new Protocol(false, {
         live: true,
-        sparse: true
+        sparse: true,
+        keyPair: keys.noise,
+        onauthenticate: function (remotePublicKey, done) {
+          console.log('LISTEN onauthenticate', remotePublicKey)
+          done()
+        }
       })
-      var core
-      proto.on('discovery-key', onfeed.bind(null, proto))
+      proto.on('discovery-key', onfeed.bind(null, proto, keys))
       pump(proto, cstream, proto, function (err) {
         // ...
       })
     })
-    server.listen(ownId)
+    server.listen(idFromKeys(keys))
     cb(null, server)
   })
-  function onfeed (proto, discoveryKey) {
+  function onfeed (proto, keys, discoveryKey) {
     self._getPubKeyForDKey(discoveryKey, function (err, pubKey) {
       if (err) return proto.destroy()
       if (!pubKey) return proto.destroy()
@@ -257,6 +287,7 @@ MQ.prototype.listen = function (cb) {
         var r = core.replicate(false, {
           sparse: true,
           live: true,
+          keyPair: keys.noise,
           stream: proto
         })
       })
@@ -389,16 +420,16 @@ MQ.prototype.createReadStream = function (name, opts) {
 MQ.prototype.connect = function (to, cb) {
   if (!cb) cb = noop
   var self = this
-  var pubKey = null, core = null
+  var keys = null, core = null
   var pending = 3
   self._openSendCore(to, function (err, core_) {
     if (err) return cb(err)
     core = core_
     if (--pending === 0) ready()
   })
-  self.getPublicKey(function (err, pubKey_) {
+  self.getKeyPairs(function (err, keys_) {
     if (err) return cb(err)
-    pubKey = pubKey_
+    keys = keys_
     if (--pending === 0) ready()
   })
   if (--pending === 0) ready()
@@ -412,11 +443,18 @@ MQ.prototype.connect = function (to, cb) {
 
   function ready () {
     var toBuf = asBuffer(to)
-    var stream = self._network.connect(toBuf, { id: pubKey })
+    var stream = self._network.connect(toBuf, {
+      id: idFromKeys(keys)
+    })
     var r = core.replicate(true, {
       ack: true,
       live: true,
-      sparse: true
+      sparse: true,
+      keyPair: keys.noise,
+      onauthenticate: function (remotePublicKey, done) {
+        console.log('CONNECT', remotePublicKey)
+        done()
+      }
     })
     connection.once('_close', function () {
       r.end()
@@ -450,7 +488,7 @@ MQ.prototype._openSendCore = function (to, cb) {
     return
   }
   self._sendCoreQueue[key] = []
-  self.getSecretKey(function (err, secretKey) {
+  self.getKeyPairs(function (err, keys) {
     var q = self._sendCoreQueue[key]
     self._sendCoreQueue[key] = null
     if (err) {
@@ -458,8 +496,9 @@ MQ.prototype._openSendCore = function (to, cb) {
       for (var i = 0; i < q.length; i++) q[i](err)
       return
     }
-    var pubKey = secretKey.slice(32)
-    var core = hypercore(self._storeFn(to), pubKey, { secretKey })
+    var core = hypercore(self._storeFn(to), keys.hypercore.publicKey, {
+      secretKey: keys.hypercore.secretKey
+    })
     self._sendCores[key] = core
     cb(null, core)
     for (var i = 0; i < q.length; i++) q[i](null, core)
@@ -471,7 +510,8 @@ MQ.prototype._openListenCore = function (id, cb) {
   if (!cb) cb = noop
   var core = self._listenCores[id]
   if (core) return nextTick(cb, null, core)
-  core = hypercore(self._storeFn(id), Buffer.from(id,'hex'), { sparse: true })
+  var pubKey = Buffer.from(id,'hex').slice(0,32)
+  core = hypercore(self._storeFn(id), pubKey, { sparse: true })
   self._listenCores[id] = core
   core.ready(function () {
     self._bitfield.read[id] = self._multi.open(B_READ + id + '!')
@@ -492,8 +532,8 @@ function asBuffer (x) {
 }
 
 function isValidKey (x) {
-  if (Buffer.isBuffer(x) && x.length === 32) return true
-  if (typeof x === 'string' && /^[0-9A-Fa-f]{64}$/.test(x)) return true
+  if (Buffer.isBuffer(x) && x.length === 64) return true
+  if (typeof x === 'string' && /^[0-9A-Fa-f]{128}$/.test(x)) return true
   return false
 }
 
