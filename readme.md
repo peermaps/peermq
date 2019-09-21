@@ -129,9 +129,9 @@ Because the listener marks messages as "read" once it receives them (with
 for building job queues or other batch processing tools.
 
 The sender could also listen for `'ack'` events from the listener to know when
-it's safe to delete messages that have been received, although this should
-happen over an authenticated channel (not presently implemented). Otherwise the
-sent messages are all saved on the sender side.
+it's safe to delete messages that have been received. `'ack'` messages are sent
+over an authenticated channel where the network session keys (noise) are signed
+by the hypercore key.
 
 # api
 
@@ -196,11 +196,6 @@ Set the document in the public key `from` at the sequence number `seq` to
 ## mq.clear({ seq, from }, cb)
 
 Remove the document in the public key `from` at the sequence number `seq`.
-
-# caveats
-
-The connections are not yet authenticated, so you can't be sure the node you
-receive an `'ack'` message from is genuine.
 
 # license
 
