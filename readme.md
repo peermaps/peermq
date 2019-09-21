@@ -56,38 +56,30 @@ if (argv._[0] === 'id') {
 create two new databases and print their IDs:
 
 ```
-$ node mq.js -d /tmp/a id # node A
+$ A=$(node mq.js -d /tmp/a id); echo $A
 41f541aa50bbd9948e794b3a5d55b4267f731a94c1ee4053470df9f514762ac4
-$ node mq.js -d /tmp/b id # node B
+$ B=$(node mq.js -d /tmp/b id); echo $B
 19eee824db6456a97f7e90a75dfde8e6ad3a4b34eee65373823a50276f33872e
 ```
 
 allow incoming connections from node B on node A:
 
 ```
-$ node mq.js -d /tmp/a add-peer \
-  19eee824db6456a97f7e90a75dfde8e6ad3a4b34eee65373823a50276f33872e
+$ node mq.js -d /tmp/a add-peer $B
 ```
 
 create some messages on node B to send to node A:
 
 ```
-$ node mq.js -d /tmp/b send \
-  --to 41f541aa50bbd9948e794b3a5d55b4267f731a94c1ee4053470df9f514762ac4 \
-  --message wow
-$ node mq.js -d /tmp/b send \
-  --to 41f541aa50bbd9948e794b3a5d55b4267f731a94c1ee4053470df9f514762ac4 \
-  --message cool
-$ node mq.js -d /tmp/b send \
-  --to 41f541aa50bbd9948e794b3a5d55b4267f731a94c1ee4053470df9f514762ac4 \
-  --message hiiiiiiii
+$ node mq.js -d /tmp/b send --to $A --message wow
+$ node mq.js -d /tmp/b send --to $A --message cool
+$ node mq.js -d /tmp/b send --to $A --message hiiiiiiii
 ```
 
 connect to node A from node B:
 
 ```
-$ node mq.js -d /tmp/b connect \
-  41f541aa50bbd9948e794b3a5d55b4267f731a94c1ee4053470df9f514762ac4
+$ node mq.js -d /tmp/b connect $A
 ```
 
 and in another terminal, listen on node A. Once a connection is made, you should
@@ -104,17 +96,11 @@ on node B, we can disconnect (ctrl+c), queue more messages to send, then
 reconnect:
 
 ```
-$ node mq.js -d /tmp/b connect \
-  41f541aa50bbd9948e794b3a5d55b4267f731a94c1ee4053470df9f514762ac4
+$ node mq.js -d /tmp/b connect $A
 ^C
-$ node mq.js -d /tmp/b send \
-  --to 41f541aa50bbd9948e794b3a5d55b4267f731a94c1ee4053470df9f514762ac4 \
-  --message beep
-$ node mq.js -d /tmp/b send \
-  --to 41f541aa50bbd9948e794b3a5d55b4267f731a94c1ee4053470df9f514762ac4 \
-  --message boop
-$ node mq.js -d /tmp/b connect \
-  41f541aa50bbd9948e794b3a5d55b4267f731a94c1ee4053470df9f514762ac4
+$ node mq.js -d /tmp/b send --to $A --message beep
+$ node mq.js -d /tmp/b send --to $A --message boop
+$ node mq.js -d /tmp/b connect $A
 ```
 
 back on node A, we now see the messages arrive:
