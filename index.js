@@ -2,7 +2,7 @@ var MultiBitfield = require('bitfield-db/multi')
 var Tinybox = require('tinybox')
 var hypercore = require('hypercore')
 var Protocol = require('hypercore-protocol')
-var { keyPair, discoveryKey } = require('hypercore-crypto')
+var hcrypto = require('hypercore-crypto')
 var pump = require('pump')
 var { Readable } = require('readable-stream')
 var { EventEmitter } = require('events')
@@ -116,7 +116,7 @@ MQ.prototype.getKeyPairs = function (cb) {
         publicKey: node.value.slice(96,128)
       }
     })
-    var hypercoreKeyPair = keyPair()
+    var hypercoreKeyPair = hcrypto.keyPair()
     var noiseKeyPair = Protocol.keyPair()
     var kpBuf = Buffer.concat([
       hypercoreKeyPair.secretKey, // 64 bytes
@@ -148,23 +148,24 @@ MQ.prototype.getKeyPairs = function (cb) {
 MQ.prototype._addPeer = function (pubKey) {
   // expects that this._peers is already loaded
   var bufPK = asBuffer(pubKey)
-  var key = D_DKEY + discoveryKey(bufPK).toString('hex')
+  var key = D_DKEY + hcrypto.discoveryKey(bufPK).toString('hex')
   this._peers.push(bufPK.toString('hex'))
   uniq(this._peers)
   this._peers.sort()
-  this._db.put(D_DKEY + discoveryKey(bufPK).toString('hex'), bufPK)
+  this._db.put(D_DKEY + hcrypto.discoveryKey(bufPK).toString('hex'), bufPK)
   this._db.put('peers', Buffer.from(JSON.stringify(this._peers)))
 }
 
 MQ.prototype._removePeer = function (pubKey) {
   // expects that this._peers is already loaded
   var bufPK = asBuffer(pubKey)
-  var key = D_DKEY + discoveryKey(bufPK).toString('hex')
+  var key = D_DKEY + hcrypto.discoveryKey(bufPK).toString('hex')
   var ix = this._peers.indexOf(bufPK.toString('hex'))
   if (ix >= 0) this._peers.splice(ix,1)
   this._peers.sort()
   // del not yet implemented, overwrite with an empty buffer:
-  this._db.put(D_DKEY + discoveryKey(bufPK).toString('hex'), Buffer.alloc(0))
+  this._db.put(D_DKEY + hcrypto.discoveryKey(bufPK).toString('hex'),
+    Buffer.alloc(0))
   this._db.put('peers', Buffer.from(JSON.stringify(this._peers)))
 }
 
@@ -251,13 +252,12 @@ MQ.prototype.listen = function (cb) {
       var proto = new Protocol(false, {
         live: true,
         sparse: true,
-        keyPair: keys.noise,
-        onauthenticate: function (remotePublicKey, done) {
-          console.log('LISTEN onauthenticate', remotePublicKey)
-          done()
-        }
+        extensions: [ 'sign-noise-key' ],
+        keyPair: keys.noise
       })
-      proto.on('discovery-key', onfeed.bind(null, proto, keys))
+      proto.once('discovery-key', function (discoveryKey) {
+        onfeed(proto, keys, discoveryKey)
+      })
       pump(proto, cstream, proto, function (err) {
         // ...
       })
@@ -279,6 +279,9 @@ MQ.prototype.listen = function (cb) {
           }
         })
         self._sendCoreLengths[id] = core.remoteLength
+        var ch = proto.open(pubKey)
+        ch.extension('sign-noise-key', hcrypto.sign(
+          keys.noise.publicKey, keys.hypercore.secretKey))
         var r = core.replicate(false, {
           sparse: true,
           live: true,
@@ -441,27 +444,39 @@ MQ.prototype.connect = function (to, cb) {
     var stream = self._network.connect(toBuf, {
       id: keys.hypercore.publicKey
     })
-    var r = core.replicate(true, {
+    var proto = new Protocol(true, {
       ack: true,
       live: true,
       sparse: true,
       keyPair: keys.noise,
-      onauthenticate: function (remotePublicKey, done) {
-        console.log('CONNECT', remotePublicKey)
-        done()
-      }
+      extensions: [ 'sign-noise-key' ]
     })
     connection.once('_close', function () {
-      r.end()
+      proto.end()
       stream.close()
     })
-    r.on('ack', function (ack) {
-      connection.emit('ack', ack)
-    })
-    pump(stream, r, stream, function (err) {
+    var ch = proto.open(core.key, { onextension })
+    pump(stream, proto, stream, function (err) {
       if (err) connection.emit('error', err)
       else connection.emit('close')
     })
+    function onextension (i, message) {
+      if (i !== 0) return // sign-noise-key
+      var ok = hcrypto.verify(proto.remotePublicKey, message, toBuf)
+      if (!ok) return proto.destroy()
+      var r = core.replicate(true, {
+        ack: true,
+        live: true,
+        sparse: true,
+        stream: proto
+      })
+      connection.once('_close', function () {
+        r.end()
+      })
+      r.on('ack', function (ack) {
+        connection.emit('ack', ack)
+      })
+    }
   }
 }
 
@@ -492,7 +507,8 @@ MQ.prototype._openSendCore = function (to, cb) {
       return
     }
     var core = hypercore(self._storeFn(to), keys.hypercore.publicKey, {
-      secretKey: keys.hypercore.secretKey
+      secretKey: keys.hypercore.secretKey,
+      extensions: [ 'sign-noise-key' ]
     })
     self._sendCores[key] = core
     cb(null, core)
@@ -506,7 +522,10 @@ MQ.prototype._openListenCore = function (id, cb) {
   var core = self._listenCores[id]
   if (core) return nextTick(cb, null, core)
   var pubKey = Buffer.from(id,'hex')
-  core = hypercore(self._storeFn(id), pubKey, { sparse: true })
+  core = hypercore(self._storeFn(id), pubKey, {
+    sparse: true,
+    extensions: [ 'sign-noise-id' ]
+  })
   self._listenCores[id] = core
   core.ready(function () {
     self._bitfield.read[id] = self._multi.open(B_READ + id + '!')
