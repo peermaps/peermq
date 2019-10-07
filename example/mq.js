@@ -10,9 +10,7 @@ require('mkdirp').sync(argv.datadir)
 
 var mq = peermq({
   network: require('../network.js'),
-  storage: function (name) {
-    return path.join(argv.datadir, name)
-  }
+  storage: argv.datadir
 })
 
 if (argv._[0] === 'id') {

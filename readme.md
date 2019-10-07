@@ -21,9 +21,7 @@ require('mkdirp').sync(argv.datadir)
 
 var mq = peermq({
   network: require('peermq/network'),
-  storage: function (name) {
-    return path.join(argv.datadir, name)
-  }
+  storage: argv.datadir
 })
 
 if (argv._[0] === 'id') {
@@ -130,8 +128,9 @@ var peermq = require('peermq')
 Create a peermq instance `mq` from:
 
 * `opts.network` - a network adapter (use `require('peermq/network')`)
-* `opts.storage(name)` - function that returns a random-access adaptor or a
-  string path for a `name` string
+* `opts.storage` - string that represents a base path OR a function that
+  receives a string name argument and returns a random-access adaptor or a
+  string path
 
 ## mq.getId(cb)
 

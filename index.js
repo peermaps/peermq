@@ -27,6 +27,10 @@ function MQ (opts) {
   if (!(this instanceof MQ)) return new MQ(opts)
   EventEmitter.call(this)
   this._network = opts.network
+  if (typeof opts.storage !== 'function' && typeof opts.storage !== 'string') {
+    throw new Error('storage must be a function or a string path. received '
+      + typeof opts.storage)
+  }
   this._storage = opts.storage
   this._openStores = {}
   this._db = new Tinybox(this._openStore('db'))
@@ -67,7 +71,11 @@ MQ.prototype = Object.create(EventEmitter.prototype)
 MQ.prototype._openStore = function (name) {
   var self = this
   if (self._openStores[name]) return self._openStores[name]
-  var s = self._storage(name)
+  if (typeof self._storage === 'function') {
+    var s = self._storage(name)
+  } else if (typeof self._storage === 'string') {
+    var s = path.join(self._storage, name)
+  }
   if (typeof s === 'string') s = raf(s)
   self._openStores[name] = s
   return s
