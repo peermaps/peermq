@@ -5,7 +5,7 @@ var { Transform } = require('readable-stream')
 var network = require('./lib/network.js')()
 
 test('send and receive', function (t) {
-  t.plan(8)
+  t.plan(11)
   var mqA = peermq({
     network,
     storage: function (name) { return ram() }
@@ -31,8 +31,40 @@ test('send and receive', function (t) {
     }
   }))
   function check () {
-    t.deepEqual(results, expected, 'expected results')
-    t.end()
+    t.deepEqual(results, expected, 'expected unread results')
+    var archived = []
+    mqA.createReadStream('archive').pipe(new Transform({
+      objectMode: true,
+      transform: function ({ from, seq, data }, enc, next) {
+        archived.push(`${from}@${seq} ${data.toString()}`)
+        next()
+      },
+      flush: function (next) {
+        t.deepEqual(archived, expected, 'expected archive results')
+      }
+    }))
+    var read = []
+    mqA.createReadStream('read').pipe(new Transform({
+      objectMode: true,
+      transform: function ({ from, seq, data }, enc, next) {
+        read.push(`${from}@${seq} ${data.toString()}`)
+        next()
+      },
+      flush: function (next) {
+        t.deepEqual(archived, expected, 'expected read results')
+      }
+    }))
+    var unread = []
+    mqA.createReadStream('unread').pipe(new Transform({
+      objectMode: true,
+      transform: function ({ from, seq, data }, enc, next) {
+        unread.push(`${from}@${seq} ${data.toString()}`)
+        next()
+      },
+      flush: function (next) {
+        t.deepEqual(unread, [], 'expected unread results')
+      }
+    }))
   }
   mqA.getId(function (err, idA) {
     t.error(err)

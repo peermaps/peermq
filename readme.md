@@ -170,8 +170,13 @@ Create a new objectMode `stream` to read records for a stream `type`.
 This stream pulls from all peer streams in live mode. As you pull messages from
 this stream, documents are downloaded from the remote database in sparse mode.
 
-Right now `type` must be `'unread'`. Soon other categories and user-created
-categories will be available.
+`type` is a string and may be one of:
+
+* `'read'`
+* `'unread'`
+* `'archive'`
+
+Soon other categories and user-created categories will be available.
 
 ## mq.archive({ seq, from }, cb)
 

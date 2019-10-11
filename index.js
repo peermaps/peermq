@@ -341,11 +341,12 @@ MQ.prototype.clear = function (msg, cb) {
 }
 
 MQ.prototype.createReadStream = function (name, opts) {
+  if (!opts) opts = {}
   var self = this
   var cores = []
   var coreKeys = []
   var offsets = {}
-  var queue = []
+  var readNextQueue = null
   self.on('_core', oncore)
   self.getPeers(function (err, peers) {
     peers.forEach(function (peer) {
@@ -354,15 +355,10 @@ MQ.prototype.createReadStream = function (name, opts) {
   })
   Object.values(self._listenCores).forEach(oncore)
 
-  var reading = false
   var stream = new Readable({
     objectMode: true,
     read: function (n) {
-      if (queue.length > 0) {
-        return this.push(queue.shift())
-      }
       // todo: check if all open cores have closed in non-live mode
-      reading = true
       for (var i = 0; i < cores.length; i++) {
         var key = coreKeys[i]
         if (self._sendCoreLengths.hasOwnProperty(key)) {
@@ -378,9 +374,10 @@ MQ.prototype.createReadStream = function (name, opts) {
       cleanup()
     }
   })
-  if (name !== 'unread') {
+  if (name !== 'unread' && name !== 'archive' && name !== 'read') {
     nextTick(function () {
-      stream.emit('error', new Error('only "unread" is supported right now'))
+      stream.emit('error', new Error('only "unread", "archive", and "read"'
+        + ' are supported right now'))
     })
   }
   return stream
@@ -388,11 +385,8 @@ MQ.prototype.createReadStream = function (name, opts) {
   function push (err, msg) {
     if (err) {
       stream.emit('error', err)
-    } else if (reading) {
-      reading = false
-      stream.push(msg)
     } else {
-      queue.push(msg)
+      stream.push(msg)
     }
   }
   function cleanup () {
@@ -402,24 +396,59 @@ MQ.prototype.createReadStream = function (name, opts) {
     cores.push(core)
     var key = core.key.toString('hex')
     coreKeys.push(key)
-    offsets[key] = -1
-    readNext(core, key, push)
+    if (!offsets.hasOwnProperty(key)) {
+      offsets[key] = -1
+    }
+    if (!self._sendCoreLengths.hasOwnProperty(key) && opts.live) {
+      self.on('_coreLength!'+key, readNext.bind(null, core, key, push))
+    } else if (!self._sendCoreLengths.hasOwnProperty(key)) {
+      self.once('_coreLength!'+key, readNext.bind(null, core, key, push))
+    } else if (opts.live) {
+      self.on('_coreLength!'+key, readNext.bind(null, core, key, push))
+      readNext(core, key, push)
+    } else {
+      readNext(core, key, push)
+    }
   }
   function readNext (core, key, cb) {
+    if (readNextQueue) return readNextQueue.push([core, key, cb])
+    readNextQueue = []
+    readNextF(core, key, cb)
+  }
+  function readNextF (core, key, cb) {
     var len = self._sendCoreLengths[key]
-    self._bitfield.read[key].next0(offsets[key], function (err, x) {
-      if (err) return cb(err)
-      else if (x >= len) {
-        // todo: only set up a listener the first time in non-live mode
-        return self.once('_coreLength!'+key,
-          readNext.bind(null, core, key, push))
+    var start = offsets[key]
+    var zero = false
+    if (name === 'unread') {
+      zero = true
+      self._bitfield.read[key].next0(offsets[key], onBit)
+    } else if (name === 'archive' || name === 'read') {
+      self._bitfield.archive[key].next1(offsets[key], onBit)
+    }
+    function onBit (err, x) {
+      if (err) return readNextCB(cb, err)
+      offsets[key] = Math.max(offsets[key], start, x)
+      if (zero && x >= len) {
+        if (!opts.live) readNextCB(cb, null, null)
+      } else if (!zero && x < 0) {
+        if (!opts.live) readNextCB(cb, null, null)
+      } else {
+        offsets[key] = Math.max(offsets[key], start, x)
+        core.get(x, function (err, buf) {
+          if (err) return readNextCB(cb, err)
+          readNextCB(cb, null, { seq: x, from: key, data: buf })
+        })
       }
-      core.get(x, function (err, buf) {
-        if (err) return cb(err)
-        offsets[key] = x
-        cb(null, { seq: x, from: key, data: buf })
-      })
-    })
+    }
+  }
+  function readNextCB (cb, err, res) {
+    cb(err, res)
+    if (readNextQueue && readNextQueue.length > 0) {
+      var q = readNextQueue.shift()
+      readNextF(q[0], q[1], q[2])
+    } else if (readNextQueue && readNextQueue.length === 0) {
+      readNextQueue = null
+    }
   }
 }
 
@@ -540,9 +569,9 @@ MQ.prototype._openListenCore = function (id, cb) {
     self._bitfield.archive[id] = self._multi.open(B_ARCHIVE + id + '!')
     self._bitfield.deleted[id] = self._multi.open(B_DELETED + id + '!')
     self.emit('_core', core)
-    if (core.length > 0) {
-      self._sendCoreLengths[id] = core.length
-      self.emit('_coreLength!'+id, core.length)
+    if (core.remoteLength > 0) {
+      self._sendCoreLengths[id] = core.remoteLength
+      self.emit('_coreLength!'+id, core.remoteLength)
     }
     cb(null, core)
   })
