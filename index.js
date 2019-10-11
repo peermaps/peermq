@@ -465,8 +465,8 @@ MQ.prototype.connect = function (to, cb) {
     })
     var ch = proto.open(core.key, { onextension })
     pump(stream, proto, stream, function (err) {
-      if (err) connection.emit('error', err)
-      else connection.emit('close')
+      //if (err) connection.emit('error', err)
+      connection.emit('close')
     })
     function onextension (i, message) {
       if (i !== 0) return // sign-noise-key

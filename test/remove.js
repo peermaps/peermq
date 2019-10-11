@@ -2,15 +2,16 @@ var test = require('tape')
 var peermq = require('../')
 var ram = require('random-access-memory')
 var { Transform } = require('readable-stream')
+var network = require('./lib/network.js')()
 
 test('remove', function (t) {
   t.plan(9)
   var mqA = peermq({
-    network: require('../network.js'),
+    network,
     storage: function (name) { return ram() }
   })
   var mqB = peermq({
-    network: require('../network.js'),
+    network,
     storage: function (name) { return ram() }
   })
   mqA.listen(function (err, server) {
