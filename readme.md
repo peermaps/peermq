@@ -131,6 +131,8 @@ Create a peermq instance `mq` from:
 * `opts.storage` - string that represents a base path OR a function that
   receives a string name argument and returns a random-access adaptor or a
   string path
+* `opts.topic` - optional function mapping a public key to a swarm topic.
+  both are buffers. swarm topics must be 32 bytes long.
 
 ## mq.getId(cb)
 

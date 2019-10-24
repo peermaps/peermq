@@ -32,6 +32,7 @@ function MQ (opts) {
       + typeof opts.storage)
   }
   this._storage = opts.storage
+  this._topic = opts.topic || function (x) { return x }
   this._openStores = {}
   this._db = new Tinybox(this._openStore('db'))
   this._sendCores = {}
@@ -270,7 +271,7 @@ MQ.prototype.listen = function (cb) {
         // ...
       })
     })
-    server.listen(keys.hypercore.publicKey)
+    server.listen(self._topic(keys.hypercore.publicKey))
     cb(null, server)
   })
   function onfeed (proto, keys, discoveryKey) {
