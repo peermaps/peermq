@@ -261,11 +261,13 @@ MQ.prototype.listen = function (cb) {
       var proto = new Protocol(false, {
         live: true,
         sparse: true,
-        extensions: [ 'sign-noise-key' ],
         keyPair: keys.noise
       })
+      var ext = proto.registerExtension('sign-noise-key')
+      ext.send(hcrypto.sign(
+        keys.noise.publicKey, keys.hypercore.secretKey))
       proto.once('discovery-key', function (discoveryKey) {
-        onfeed(proto, keys, discoveryKey)
+        onfeed(proto, keys, discoveryKey, ext)
       })
       pump(proto, cstream, proto, function (err) {
         // ...
@@ -274,7 +276,7 @@ MQ.prototype.listen = function (cb) {
     server.listen(self._topic(keys.hypercore.publicKey))
     cb(null, server)
   })
-  function onfeed (proto, keys, discoveryKey) {
+  function onfeed (proto, keys, discoveryKey, ext) {
     self._getPubKeyForDKey(discoveryKey, function (err, pubKey) {
       if (err) return proto.destroy()
       if (!pubKey) return proto.destroy()
@@ -288,9 +290,6 @@ MQ.prototype.listen = function (cb) {
           }
         })
         self._sendCoreLengths[id] = core.remoteLength
-        var ch = proto.open(pubKey)
-        ch.extension('sign-noise-key', hcrypto.sign(
-          keys.noise.publicKey, keys.hypercore.secretKey))
         var r = core.replicate(false, {
           sparse: true,
           live: true,
@@ -486,20 +485,18 @@ MQ.prototype.connect = function (to, cb) {
       ack: true,
       live: true,
       sparse: true,
-      keyPair: keys.noise,
-      extensions: [ 'sign-noise-key' ]
+      keyPair: keys.noise
     })
+    var ext = proto.registerExtension('sign-noise-key', { onmessage })
     connection.once('_close', function () {
       proto.end()
       stream.close()
     })
-    var ch = proto.open(core.key, { onextension })
     pump(stream, proto, stream, function (err) {
       //if (err) connection.emit('error', err)
       connection.emit('close')
     })
-    function onextension (i, message) {
-      if (i !== 0) return // sign-noise-key
+    function onmessage (message) {
       var ok = hcrypto.verify(proto.remotePublicKey, message, toBuf)
       if (!ok) return proto.destroy()
       var r = core.replicate(true, {
