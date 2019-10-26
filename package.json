@@ -1,6 +1,6 @@
 {
   "name": "peermq",
-  "version": "3.3.0",
+  "version": "4.0.0",
   "description": "p2p message queue",
   "license": "Parity-6.0.0 AND Apache-2.0",
   "keywords": [
