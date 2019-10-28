@@ -478,7 +478,8 @@ MQ.prototype.connect = function (to, cb) {
 
   function ready () {
     var toBuf = asBuffer(to)
-    var stream = self._network.connect(toBuf, {
+    var topic = self._topic(toBuf)
+    var stream = self._network.connect(topic, {
       id: keys.hypercore.publicKey
     })
     var proto = new Protocol(true, {
