@@ -518,7 +518,8 @@ MQ.prototype.connect = function (to, cb) {
 
 MQ.prototype.send = function (m, cb) {
   this._openSendCore(m.to, function (err, core) {
-    core.append(m.message, cb)
+    if (err) cb(err)
+    else core.append(m.message, cb)
   })
 }
 
@@ -527,7 +528,7 @@ MQ.prototype._openSendCore = function (to, cb) {
   var key = to.toString('hex')
   if (!isValidKey(to)) return nextTick(cb, new Error('invalid key: ' + key))
   if (self._sendCores[key]) {
-    return nextTick(cb, self._sendCores[key])
+    return nextTick(cb, null, self._sendCores[key])
   }
   if (self._sendCoreQueue[key]) {
     self._sendCoreQueue[key].push(cb)
